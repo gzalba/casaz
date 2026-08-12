@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { auth, db, googleProvider } from "./firebase";
+import { auth, db, googleProvider, configOK, faltantes } from "./firebase";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
@@ -720,6 +720,7 @@ export default function PortalCasa() {
 
   // sesión
   useEffect(() => {
+    if (!configOK) return;
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthListo(true);
@@ -767,6 +768,23 @@ export default function PortalCasa() {
     { id: "casa", label: "Pago de la casa" },
     { id: "reformas", label: "Reformas" },
   ];
+
+  if (!configOK) {
+    return (
+      <div style={{ fontFamily: font, background: C.paper, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        <div style={{ background: C.card, border: `1px solid ${C.line}`, borderLeft: `4px solid ${C.red}`, borderRadius: 10, padding: "28px 30px", maxWidth: 520, boxShadow: "0 4px 24px rgba(22,40,60,.06)" }}>
+          <div style={{ fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: C.red, fontWeight: 700 }}>Configuración incompleta</div>
+          <h1 style={{ margin: "6px 0 10px", fontSize: 22, fontWeight: 800, color: C.ink }}>Falta configurar Firebase</h1>
+          <p style={{ fontSize: 13, color: C.inkSoft, margin: "0 0 12px", lineHeight: 1.5 }}>
+            Estas variables de entorno no estaban definidas cuando se compiló la app. En Vercel: Settings → Environment Variables, y después volvé a hacer Redeploy.
+          </p>
+          <ul style={{ fontFamily: mono, fontSize: 12, color: C.ink, background: C.subtle, border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 10px 10px 28px", margin: 0 }}>
+            {faltantes.map((v) => <li key={v}>{v}</li>)}
+          </ul>
+        </div>
+      </div>
+    );
+  }
 
   if (!authListo) {
     return <div style={{ fontFamily: font, color: C.inkSoft, padding: 40, background: C.paper, minHeight: "100vh" }}>Cargando…</div>;

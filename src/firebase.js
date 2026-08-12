@@ -13,7 +13,34 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FB_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-export const googleProvider = new GoogleAuthProvider();
+// Nombres de las variables que faltaron al momento del build.
+// Vite reemplaza import.meta.env.* en tiempo de build: si no estaban cargadas
+// en Vercel, quedan undefined y getAuth() explota (auth/invalid-api-key),
+// dejando la página en blanco. Por eso chequeamos antes de inicializar.
+export const faltantes = Object.entries({
+  VITE_FB_API_KEY: firebaseConfig.apiKey,
+  VITE_FB_AUTH_DOMAIN: firebaseConfig.authDomain,
+  VITE_FB_PROJECT_ID: firebaseConfig.projectId,
+  VITE_FB_STORAGE_BUCKET: firebaseConfig.storageBucket,
+  VITE_FB_MSG_SENDER_ID: firebaseConfig.messagingSenderId,
+  VITE_FB_APP_ID: firebaseConfig.appId,
+})
+  .filter(([, v]) => !v)
+  .map(([k]) => k);
+
+export const configOK = faltantes.length === 0;
+
+let auth = null;
+let db = null;
+let googleProvider = null;
+
+if (configOK) {
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+  googleProvider = new GoogleAuthProvider();
+} else {
+  console.error("Falta configurar Firebase. Variables ausentes:", faltantes.join(", "));
+}
+
+export { auth, db, googleProvider };
