@@ -11,6 +11,11 @@ service cloud.firestore {
 
     match /usuarios/{uid} {
       allow read, write: if esElDueno() && request.auth.uid == uid;
+
+      // Comprobantes: un documento por archivo, para no engordar el principal
+      match /comprobantes/{archivo} {
+        allow read, write: if esElDueno() && request.auth.uid == uid;
+      }
     }
   }
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { auth, db, googleProvider, configOK, faltantes } from "./firebase";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
 
 /* ── Tokens ─────────────────────────────────────────────── */
 const C = {
@@ -91,6 +91,168 @@ const inicial = {
   reformas: [],
 };
 
+/* ── Comprobantes ───────────────────────────────────────────
+   Cada archivo va en su propio documento usuarios/{uid}/comprobantes/{id},
+   así el documento principal no engorda (Firestore corta en 1 MB por
+   documento). Las fotos se achican en el navegador antes de subirse.
+──────────────────────────────────────────────────────────── */
+const MAX_COMPROBANTE = 700 * 1024; // deja margen sobre el límite de 1 MB
+
+async function comprimirImagen(file, maxLado = 1400, calidad = 0.72) {
+  const bitmap = await createImageBitmap(file);
+  const escala = Math.min(1, maxLado / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * escala);
+  canvas.height = Math.round(bitmap.height * escala);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  return canvas.toDataURL("image/jpeg", calidad);
+}
+
+const archivoADataUrl = (file) =>
+  new Promise((ok, fallo) => {
+    const fr = new FileReader();
+    fr.onload = () => ok(fr.result);
+    fr.onerror = () => fallo(fr.error);
+    fr.readAsDataURL(file);
+  });
+
+/** Sube un archivo y devuelve su ficha liviana { id, nombre, tipo, tamano }. */
+async function subirComprobante(uid, file) {
+  const esImagen = file.type.startsWith("image/");
+  let dataUrl = esImagen ? await comprimirImagen(file) : await archivoADataUrl(file);
+  if (esImagen && dataUrl.length > MAX_COMPROBANTE) dataUrl = await comprimirImagen(file, 1000, 0.55);
+  if (dataUrl.length > MAX_COMPROBANTE) {
+    throw new Error(
+      `"${file.name}" pesa ${Math.round(dataUrl.length / 1024)} KB y el máximo es 700 KB. Si es un PDF, sacale una foto o reducilo antes de subirlo.`,
+    );
+  }
+  const id = nuevoId();
+  const archivo = {
+    nombre: file.name,
+    tipo: esImagen ? "image/jpeg" : file.type || "application/octet-stream",
+    tamano: dataUrl.length,
+    dataUrl,
+    creado: hoy(),
+  };
+  if (DEMO) localStorage.setItem(`${KEY}-c-${id}`, JSON.stringify(archivo));
+  else await setDoc(doc(db, "usuarios", uid, "comprobantes", id), archivo);
+  return { id, nombre: archivo.nombre, tipo: archivo.tipo, tamano: archivo.tamano };
+}
+
+async function leerComprobante(uid, id) {
+  if (DEMO) {
+    const guardado = localStorage.getItem(`${KEY}-c-${id}`);
+    return guardado ? JSON.parse(guardado) : null;
+  }
+  const snap = await getDoc(doc(db, "usuarios", uid, "comprobantes", id));
+  return snap.exists() ? snap.data() : null;
+}
+
+async function borrarComprobante(uid, id) {
+  if (DEMO) localStorage.removeItem(`${KEY}-c-${id}`);
+  else await deleteDoc(doc(db, "usuarios", uid, "comprobantes", id));
+}
+
+const pesoLegible = (bytes) => `${Math.max(1, Math.round((bytes || 0) / 1024))} KB`;
+
+function Comprobantes({ uid, lista = [], onChange }) {
+  const [estado, setEstado] = useState(null); // null | "subiendo" | texto de error
+  const [viendo, setViendo] = useState(null); // archivo abierto en el visor
+  const input = useRef(null);
+
+  const subir = async (files) => {
+    setEstado("subiendo");
+    try {
+      const nuevos = [];
+      for (const f of files) nuevos.push(await subirComprobante(uid, f));
+      onChange([...lista, ...nuevos]);
+      setEstado(null);
+    } catch (e) {
+      setEstado(e.message || "No se pudo subir el archivo");
+    }
+    if (input.current) input.current.value = "";
+  };
+
+  // Se muestra acá adentro: abrir una pestaña después de esperar la descarga
+  // lo bloquea el navegador, y en el celular es más cómodo verlo en la misma pantalla.
+  const ver = async (ficha) => {
+    setEstado(null);
+    try {
+      const archivo = await leerComprobante(uid, ficha.id);
+      if (!archivo) throw new Error("Ese comprobante ya no está guardado");
+      setViendo({ ...archivo, nombre: ficha.nombre });
+    } catch (e) {
+      setEstado(e.message || "No se pudo abrir el comprobante");
+    }
+  };
+
+  const quitar = async (ficha) => {
+    onChange(lista.filter((c) => c.id !== ficha.id));
+    try { await borrarComprobante(uid, ficha.id); } catch { /* la ficha ya salió de la lista */ }
+  };
+
+  return (
+    <>
+      <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+        <Etiqueta>Comprobantes ({lista.length})</Etiqueta>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+          {lista.map((c) => (
+            <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${C.line}`, background: "#fff", borderRadius: 4, padding: "3px 6px", fontSize: 12 }}>
+              <button
+                style={{ ...btnGhost, border: "none", padding: 0, color: C.blue, fontWeight: 600, maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                onClick={() => ver(c)}
+                title={`Ver ${c.nombre}`}
+              >
+                {c.tipo?.startsWith("image/") ? "🖼" : "📄"} {c.nombre}
+              </button>
+              <span style={{ color: C.inkSoft, fontFamily: mono, fontSize: 11 }}>{pesoLegible(c.tamano)}</span>
+              <button style={{ ...btnGhost, border: "none", padding: "0 2px" }} onClick={() => quitar(c)} title="Eliminar comprobante">✕</button>
+            </span>
+          ))}
+
+          <input
+            ref={input}
+            type="file"
+            accept="image/*,application/pdf"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => e.target.files?.length && subir([...e.target.files])}
+          />
+          <button style={btn(C.blue, true)} onClick={() => input.current?.click()} disabled={estado === "subiendo"}>
+            {estado === "subiendo" ? "Subiendo…" : "+ Subir comprobante"}
+          </button>
+        </div>
+        {estado && estado !== "subiendo" && (
+          <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>{estado}</div>
+        )}
+        <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 6 }}>
+          Las fotos se achican solas antes de guardarse. Desde el celular podés sacar la foto en el momento.
+        </div>
+      </div>
+
+      {viendo && (
+        <div
+          className="no-imprimir"
+          style={{ position: "fixed", inset: 0, background: "rgba(22,40,60,.78)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 16, zIndex: 60 }}
+          onClick={(e) => e.target === e.currentTarget && setViendo(null)}
+        >
+          <div style={{ display: "flex", gap: 8, alignItems: "center", color: "#fff", fontSize: 13, maxWidth: "100%" }}>
+            <span style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viendo.nombre}</span>
+            <a href={viendo.dataUrl} download={viendo.nombre} style={{ ...btn(C.blue, true), textDecoration: "none" }}>Descargar</a>
+            <button style={btn("#ffffff33", true)} onClick={() => setViendo(null)}>Cerrar ✕</button>
+          </div>
+          {viendo.tipo?.startsWith("image/") ? (
+            <img src={viendo.dataUrl} alt={viendo.nombre} style={{ maxWidth: "min(900px, 92vw)", maxHeight: "76vh", objectFit: "contain", background: "#fff", borderRadius: 6 }} />
+          ) : (
+            <iframe title={viendo.nombre} src={viendo.dataUrl} style={{ width: "min(900px, 92vw)", height: "76vh", background: "#fff", border: "none", borderRadius: 6 }} />
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 /* ── Modelo de ítem con pagos parciales ─────────────────────
    item: { id, concepto, monto, moneda, comprometido(bool),
            pagos: [{ id, fecha, monto, tc }] }
@@ -106,7 +268,8 @@ const fixTC = (n) => (n > 0 && n < 50 ? n * 1000 : n);
 // deduciblePorDefecto: los de sucesión entraban enteros en la deducción, así que se marcan solos
 function migrarItem(it, fx, deduciblePorDefecto = false) {
   const deducible = it.deducible ?? deduciblePorDefecto;
-  if (it.pagos) return { ...it, deducible, pagos: it.pagos.map((p) => ({ ...p, tc: fixTC(Number(p.tc) || fx) })) };
+  const comprobantes = it.comprobantes || [];
+  if (it.pagos) return { ...it, deducible, comprobantes, pagos: it.pagos.map((p) => ({ ...p, tc: fixTC(Number(p.tc) || fx) })) };
   const pagos =
     it.estado === "pagado" && Number(it.monto) > 0
       ? [{ id: nuevoId(), fecha: "", monto: Number(it.monto), tc: fx }]
@@ -118,6 +281,7 @@ function migrarItem(it, fx, deduciblePorDefecto = false) {
     moneda: it.moneda || "ARS",
     comprometido: it.estado === "comprometido",
     deducible,
+    comprobantes,
     pagos,
   };
 }
@@ -255,7 +419,7 @@ function NumInput({ value, onValue, onEnter, style, ...rest }) {
 }
 
 /* ── Fila de ítem con pagos parciales ───────────────────── */
-function FilaItem({ it, fx, onPatch, onBorrar }) {
+function FilaItem({ it, fx, uid, onPatch, onBorrar }) {
   const [abierto, setAbierto] = useState(false);
   const [np, setNp] = useState({ fecha: hoy(), monto: "", tc: "" });
   const c = calcItem(it, fx);
@@ -300,6 +464,9 @@ function FilaItem({ it, fx, onPatch, onBorrar }) {
               {" "}entra en la deducción
               {it.deducible && <> (US$ {fmt(c.totalUSD / 2, 2)} a favor)</>}
             </label>
+            {(it.comprobantes?.length || 0) > 0 && (
+              <span title={`${it.comprobantes.length} comprobante(s) adjuntos`}> · 📎 {it.comprobantes.length}</span>
+            )}
           </div>
         </div>
         <NumInput title="Costo total del ítem" value={it.monto} onValue={(n) => onPatch({ monto: n })} />
@@ -351,6 +518,8 @@ function FilaItem({ it, fx, onPatch, onBorrar }) {
               Restan {it.moneda === "ARS" ? "$" : "US$"} {fmt(c.restanteNom)} (≈ US$ {fmt(c.restanteUSD, 2)} al dólar de referencia actual).
             </div>
           )}
+
+          <Comprobantes uid={uid} lista={it.comprobantes} onChange={(cs) => onPatch({ comprobantes: cs })} />
         </div>
       )}
     </div>
@@ -358,7 +527,7 @@ function FilaItem({ it, fx, onPatch, onBorrar }) {
 }
 
 /* ── Módulo de costos (sucesión / escritura / aportes) ──── */
-function ItemsModulo({ titulo, subtitulo, items, onChange, fx, verbo = "gasto" }) {
+function ItemsModulo({ titulo, subtitulo, items, onChange, fx, uid, verbo = "gasto" }) {
   const [nuevo, setNuevo] = useState({ concepto: "", monto: "", moneda: "ARS" });
   const t = totales(items, fx);
   const deducible = totalDeducible(items, fx);
@@ -367,7 +536,7 @@ function ItemsModulo({ titulo, subtitulo, items, onChange, fx, verbo = "gasto" }
 
   const agregar = () => {
     if (!nuevo.concepto.trim() || !Number(nuevo.monto)) return;
-    onChange([...items, { id: nuevoId(), concepto: nuevo.concepto.trim(), monto: Number(nuevo.monto), moneda: nuevo.moneda, comprometido: false, pagos: [] }]);
+    onChange([...items, { id: nuevoId(), concepto: nuevo.concepto.trim(), monto: Number(nuevo.monto), moneda: nuevo.moneda, comprometido: false, deducible: false, comprobantes: [], pagos: [] }]);
     setNuevo({ concepto: "", monto: "", moneda: nuevo.moneda });
   };
   const patch = (id, p) => onChange(items.map((i) => (i.id === id ? { ...i, ...p } : i)));
@@ -410,7 +579,18 @@ function ItemsModulo({ titulo, subtitulo, items, onChange, fx, verbo = "gasto" }
       )}
 
       {items.map((it) => (
-        <FilaItem key={it.id} it={it} fx={fx} onPatch={(p) => patch(it.id, p)} onBorrar={() => onChange(items.filter((x) => x.id !== it.id))} />
+        <FilaItem
+          key={it.id}
+          it={it}
+          fx={fx}
+          uid={uid}
+          onPatch={(p) => patch(it.id, p)}
+          onBorrar={() => {
+            // Al borrar el ítem se borran también sus comprobantes, para no dejar archivos sueltos
+            for (const c of it.comprobantes || []) borrarComprobante(uid, c.id).catch(() => {});
+            onChange(items.filter((x) => x.id !== it.id));
+          }}
+        />
       ))}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 110px 70px 110px", gap: 8, marginTop: 14, alignItems: "center" }}>
@@ -984,6 +1164,211 @@ function Reformas({ items, onChange, fx }) {
   );
 }
 
+/* ── La casa que se va llenando ─────────────────────────── */
+const SILUETA_CASA = "M60 6 L112 46 L112 104 L8 104 L8 46 Z";
+
+function CasaProgreso({ pct, ancho = 140 }) {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  const PISO = 104, TECHO = 8;
+  const alto = ((PISO - TECHO) * p) / 100;
+
+  return (
+    <svg viewBox="0 0 120 110" width={ancho} height={ancho * (110 / 120)} role="img" aria-label={`Avance ${p.toFixed(0)}%`}>
+      <defs>
+        <clipPath id="silueta-casa"><path d={SILUETA_CASA} /></clipPath>
+        <linearGradient id="relleno-casa" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stopColor="#2F7A52" />
+          <stop offset="100%" stopColor="#7FD1A0" />
+        </linearGradient>
+      </defs>
+
+      <g clipPath="url(#silueta-casa)">
+        <rect x="0" y="0" width="120" height="110" fill="rgba(255,255,255,.10)" />
+        <rect
+          x="0"
+          y={PISO - alto}
+          width="120"
+          height={alto}
+          fill="url(#relleno-casa)"
+          style={{ transition: "y .7s ease, height .7s ease" }}
+        />
+        {/* línea de agua, para que se lea como que se llena */}
+        {p > 0 && p < 100 && (
+          <rect x="0" y={PISO - alto} width="120" height="1.6" fill="#BFF0D3" style={{ transition: "y .7s ease" }} />
+        )}
+      </g>
+
+      <path d={SILUETA_CASA} fill="none" stroke="#fff" strokeWidth="3" strokeLinejoin="round" />
+      <path d="M92 26 L92 13 L101 13 L101 34" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" />
+      <rect x="51" y="74" width="18" height="30" rx="1.5" fill="none" stroke="#fff" strokeWidth="2.4" />
+      <circle cx="65" cy="89" r="1.6" fill="#fff" />
+      <rect x="23" y="58" width="17" height="15" rx="1.5" fill="none" stroke="#fff" strokeWidth="2.2" />
+      <rect x="80" y="58" width="17" height="15" rx="1.5" fill="none" stroke="#fff" strokeWidth="2.2" />
+    </svg>
+  );
+}
+
+/* ── Informe para la parte vendedora ────────────────────── */
+function filasInforme(data, ids) {
+  const filas = [];
+  for (const [lista, origen] of [[data.sucesion, "Sucesión"], [data.escritura, "Escritura"]]) {
+    for (const it of lista) {
+      if (!ids.includes(it.id)) continue;
+      const c = calcItem(it, data.fx);
+      filas.push({
+        id: it.id, origen, concepto: it.concepto || "(sin nombre)", moneda: it.moneda,
+        monto: Number(it.monto) || 0, usd: c.totalUSD, pagadoNom: c.pagadoNom, pct: c.pct,
+        adjuntos: it.comprobantes?.length || 0,
+      });
+    }
+  }
+  return filas;
+}
+
+function ReporteImprimible({ data, ids, nota }) {
+  const filas = filasInforme(data, ids);
+  const total = filas.reduce((s, f) => s + f.usd, 0);
+  const pct = Number(data.casa.pctDeduccion ?? 50);
+  const fuente = FUENTES_DOLAR.find((f) => f.id === (data.fxFuente || "blue"))?.label ?? "";
+  const th = { textAlign: "left", borderBottom: "1.5px solid #000", padding: "6px 8px 4px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em" };
+  const td = { padding: "6px 8px", borderBottom: "1px solid #ccc", fontSize: 12, verticalAlign: "top" };
+
+  return (
+    <div className="impresion" style={{ background: "#fff", color: "#111", padding: 20, fontFamily: font }}>
+      <div style={{ borderBottom: "2px solid #000", paddingBottom: 8, marginBottom: 14 }}>
+        <div style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase" }}>Expediente · Compra de la casa</div>
+        <h1 style={{ margin: "3px 0 0", fontSize: 19, fontWeight: 800 }}>Gastos a deducir del precio</h1>
+        <div style={{ fontSize: 11, color: "#444", marginTop: 4 }}>
+          Emitido el {new Date().toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}
+          {" · "}Dólar de referencia: ${fmt(data.fx)} {fuente && `(${fuente})`}
+        </div>
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <th style={th}>Concepto</th>
+            <th style={th}>Origen</th>
+            <th style={{ ...th, textAlign: "right" }}>Importe</th>
+            <th style={{ ...th, textAlign: "right" }}>Pagado</th>
+            <th style={{ ...th, textAlign: "right" }}>Equivalente USD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filas.map((f) => (
+            <tr key={f.id}>
+              <td style={td}>
+                {f.concepto}
+                {f.adjuntos > 0 && <span style={{ color: "#666", fontSize: 10 }}> · {f.adjuntos} comprobante{f.adjuntos === 1 ? "" : "s"}</span>}
+              </td>
+              <td style={td}>{f.origen}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{f.moneda === "ARS" ? "$" : "US$"} {fmt(f.monto)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>
+                {f.moneda === "ARS" ? "$" : "US$"} {fmt(f.pagadoNom)}
+                <span style={{ color: "#666", fontSize: 10 }}> ({f.pct.toFixed(0)}%)</span>
+              </td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 700 }}>US$ {fmt(f.usd, 2)}</td>
+            </tr>
+          ))}
+          {filas.length === 0 && (
+            <tr><td style={td} colSpan={5}>No hay ítems seleccionados.</td></tr>
+          )}
+        </tbody>
+      </table>
+
+      <div style={{ marginTop: 16, marginLeft: "auto", width: 300, fontSize: 13 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}>
+          <span>Total de gastos informados</span>
+          <b style={{ fontFamily: mono }}>US$ {fmt(total, 2)}</b>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: "2px solid #000", fontWeight: 800 }}>
+          <span>{pct}% a deducir del precio</span>
+          <span style={{ fontFamily: mono }}>US$ {fmt(total * (pct / 100), 2)}</span>
+        </div>
+      </div>
+
+      {nota?.trim() && (
+        <div style={{ marginTop: 18, fontSize: 12, whiteSpace: "pre-wrap", borderTop: "1px solid #ccc", paddingTop: 10 }}>{nota}</div>
+      )}
+
+      <div style={{ marginTop: 22, fontSize: 10, color: "#666", borderTop: "1px solid #ccc", paddingTop: 8 }}>
+        Los importes en pesos se convierten a dólares al tipo de cambio de cada pago; lo que falta pagar, al dólar de referencia del día.
+        Los comprobantes de cada gasto están disponibles a pedido.
+      </div>
+    </div>
+  );
+}
+
+function Informe({ data, onCerrar }) {
+  const deduciblesPorDefecto = [...data.sucesion, ...data.escritura].filter((i) => i.deducible).map((i) => i.id);
+  const [ids, setIds] = useState(deduciblesPorDefecto);
+  const [nota, setNota] = useState("");
+
+  const alternar = (id) => setIds((xs) => (xs.includes(id) ? xs.filter((x) => x !== id) : [...xs, id]));
+  const grupos = [
+    { titulo: "Sucesión", items: data.sucesion },
+    { titulo: "Escritura", items: data.escritura },
+  ];
+
+  return (
+    <div
+      className="no-imprimir"
+      style={{ position: "fixed", inset: 0, background: "rgba(22,40,60,.55)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 20, overflowY: "auto", zIndex: 50 }}
+      onClick={(e) => e.target === e.currentTarget && onCerrar()}
+    >
+      <div style={{ background: C.card, borderRadius: 10, maxWidth: 820, width: "100%", margin: "20px 0", boxShadow: "0 10px 40px rgba(0,0,0,.25)" }}>
+        <div style={{ padding: "18px 20px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 19, fontWeight: 800, color: C.ink }}>Informe para la parte vendedora</h2>
+            <div style={{ fontSize: 12, color: C.inkSoft }}>Elegí qué gastos mostrar; el PDF sale con el detalle y el total a deducir</div>
+          </div>
+          <button style={btnGhost} onClick={onCerrar}>Cerrar ✕</button>
+        </div>
+
+        <div style={{ padding: "16px 20px", maxHeight: "40vh", overflowY: "auto" }}>
+          {grupos.map((g) => (
+            <div key={g.titulo} style={{ marginBottom: 14 }}>
+              <Etiqueta>{g.titulo}</Etiqueta>
+              {g.items.length === 0 && <div style={{ fontSize: 12, color: C.inkSoft }}>Sin ítems cargados.</div>}
+              {g.items.map((it) => {
+                const c = calcItem(it, data.fx);
+                return (
+                  <label key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 13, cursor: "pointer" }}>
+                    <input type="checkbox" checked={ids.includes(it.id)} onChange={() => alternar(it.id)} />
+                    <span style={{ flex: 1 }}>{it.concepto || "(sin nombre)"}</span>
+                    <span style={{ fontFamily: mono, color: C.inkSoft }}>US$ {fmt(c.totalUSD, 2)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          ))}
+          <Etiqueta>Nota al pie (opcional)</Etiqueta>
+          <textarea
+            style={{ ...inputStyle, minHeight: 60, fontFamily: font }}
+            value={nota}
+            onChange={(e) => setNota(e.target.value)}
+            placeholder="Ej.: detalle de gastos de sucesión abonados por la parte compradora, a descontar del precio acordado."
+          />
+        </div>
+
+        <div style={{ padding: "12px 20px", borderTop: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12, color: C.inkSoft }}>
+            {ids.length} ítem{ids.length === 1 ? "" : "s"} seleccionado{ids.length === 1 ? "" : "s"} · se abre el diálogo de impresión: elegí <b>Guardar como PDF</b>
+          </div>
+          <button style={btn(C.blue)} onClick={() => window.print()}>Descargar PDF</button>
+        </div>
+
+        <div style={{ padding: 20, background: C.subtle, borderRadius: "0 0 10px 10px" }}>
+          <Etiqueta>Vista previa</Etiqueta>
+          <div style={{ border: `1px solid ${C.line}`, background: "#fff" }}>
+            <ReporteImprimible data={data} ids={ids} nota={nota} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Resumen ────────────────────────────────────────────── */
 function Resumen({ data }) {
   const { fx } = data;
@@ -1002,21 +1387,30 @@ function Resumen({ data }) {
   const totalPagado = tS.pagado + tE.pagado + ahorrado;
   const totalComprometido = tS.comprometido + tE.comprometido;
   const pctGlobal = totalObjetivo > 0 ? (totalPagado / totalObjetivo) * 100 : 0;
+  const [informe, setInforme] = useState(false);
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <div style={{ background: C.ink, borderRadius: 8, padding: "24px 22px", color: "#fff" }}>
-        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em", opacity: 0.7, fontWeight: 700 }}>Avance global del proyecto</div>
-        <div style={{ fontSize: 44, fontWeight: 800, fontFamily: mono, lineHeight: 1.1, margin: "6px 0 12px" }}>
-          {pctGlobal.toFixed(1)}%
-        </div>
-        <Regla pagado={totalPagado} comprometido={totalComprometido} total={totalObjetivo} height={16} />
-        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 13, marginTop: 10, opacity: 0.9 }}>
-          <span>Pagado: US$ {fmt(totalPagado)}</span>
-          <span>Comprometido: US$ {fmt(totalComprometido)}</span>
-          <span>Objetivo total: US$ {fmt(totalObjetivo)}</span>
+      <div style={{ background: C.ink, borderRadius: 8, padding: "24px 22px", color: "#fff", display: "flex", gap: 22, alignItems: "center", flexWrap: "wrap" }}>
+        <CasaProgreso pct={pctGlobal} />
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em", opacity: 0.7, fontWeight: 700 }}>Avance global del proyecto</div>
+          <div style={{ fontSize: 44, fontWeight: 800, fontFamily: mono, lineHeight: 1.1, margin: "6px 0 12px" }}>
+            {pctGlobal.toFixed(1)}%
+          </div>
+          <Regla pagado={totalPagado} comprometido={totalComprometido} total={totalObjetivo} height={16} />
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 13, marginTop: 10, opacity: 0.9 }}>
+            <span>Pagado: US$ {fmt(totalPagado)}</span>
+            <span>Comprometido: US$ {fmt(totalComprometido)}</span>
+            <span>Objetivo total: US$ {fmt(totalObjetivo)}</span>
+          </div>
+          <button style={{ ...btn("#ffffff22"), marginTop: 14, border: "1px solid rgba(255,255,255,.35)" }} onClick={() => setInforme(true)}>
+            Informe de gastos a deducir (PDF)
+          </button>
         </div>
       </div>
+
+      {informe && <Informe data={data} onCerrar={() => setInforme(false)} />}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
         {bloques.map((b) => {
@@ -1235,7 +1629,14 @@ export default function PortalCasa() {
   return (
     <div style={{ fontFamily: font, background: C.paper, minHeight: "100vh" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700;800&display=swap');
-        input:focus, select:focus, button:focus-visible { outline: 2px solid ${C.blue}; outline-offset: 1px; }`}</style>
+        input:focus, select:focus, button:focus-visible { outline: 2px solid ${C.blue}; outline-offset: 1px; }
+        @media print {
+          /* Solo se imprime el informe, esté donde esté en la página */
+          body * { visibility: hidden !important; }
+          .impresion, .impresion * { visibility: visible !important; }
+          .impresion { position: absolute !important; left: 0; top: 0; width: 100%; border: none !important; padding: 0 !important; }
+        }
+        @page { margin: 14mm; }`}</style>
 
       <header style={{ borderBottom: `2px solid ${C.ink}`, background: C.paper, padding: "18px 20px 0" }}>
         <div style={{ maxWidth: 980, margin: "0 auto" }}>
@@ -1284,6 +1685,7 @@ export default function PortalCasa() {
             items={data.sucesion}
             onChange={(sucesion) => setData({ ...data, sucesion })}
             fx={data.fx}
+            uid={user.uid}
           />
         )}
         {tab === "escritura" && (
@@ -1293,6 +1695,7 @@ export default function PortalCasa() {
             items={data.escritura}
             onChange={(escritura) => setData({ ...data, escritura })}
             fx={data.fx}
+            uid={user.uid}
           />
         )}
         {tab === "casa" && <PagoCasa casa={data.casa} onChange={(casa) => setData({ ...data, casa })} fx={data.fx} baseDed={baseDeduccion(data)} />}
