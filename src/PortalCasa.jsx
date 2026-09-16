@@ -709,10 +709,25 @@ function normalizar(d) {
   };
 }
 
+/** Firestore rechaza `undefined` y falla toda la escritura: las migraciones que borran campos los dejan así */
+function sinUndefined(v) {
+  if (Array.isArray(v)) return v.map(sinUndefined);
+  if (v && typeof v === "object") {
+    return Object.fromEntries(
+      Object.entries(v)
+        .filter(([, x]) => x !== undefined)
+        .map(([k, x]) => [k, sinUndefined(x)]),
+    );
+  }
+  return v;
+}
+
 export default function PortalCasa() {
   const [data, setData] = useState(inicial);
   const [tab, setTab] = useState("resumen");
   const [estado, setEstado] = useState("cargando"); // cargando | listo | guardando | error
+  // Motivo real del fallo (código de Firebase), para no mostrar solo "No se pudo guardar"
+  const [errorDetalle, setErrorDetalle] = useState(null);
   const [user, setUser] = useState(null);
   const [authListo, setAuthListo] = useState(false);
   const timer = useRef(null);
@@ -738,7 +753,10 @@ export default function PortalCasa() {
         const snap = await getDoc(doc(db, "usuarios", user.uid));
         if (snap.exists()) setData(normalizar(snap.data()));
         else setData(inicial);
-      } catch (e) { console.error(e); }
+      } catch (e) {
+        console.error("Error al leer de Firestore:", e);
+        setErrorDetalle(e?.code ? `${e.code} — ${e.message ?? ""}` : String(e?.message ?? e));
+      }
       cargado.current = true;
       setEstado("listo");
     })();
@@ -751,9 +769,14 @@ export default function PortalCasa() {
     clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
       try {
-        await setDoc(doc(db, "usuarios", user.uid), data);
+        await setDoc(doc(db, "usuarios", user.uid), sinUndefined(data));
+        setErrorDetalle(null);
         setEstado("listo");
-      } catch (e) { console.error(e); setEstado("error"); }
+      } catch (e) {
+        console.error("Error al guardar en Firestore:", e);
+        setErrorDetalle(e?.code ? `${e.code} — ${e.message ?? ""}` : String(e?.message ?? e));
+        setEstado("error");
+      }
     }, 700);
     return () => clearTimeout(timer.current);
   }, [data, user]);
@@ -832,8 +855,12 @@ export default function PortalCasa() {
                   title="Dólar de referencia actual: se usa para dolarizar lo pendiente y como valor sugerido al cargar pagos"
                 />
               </label>
-              <span style={{ fontSize: 12, color: estado === "error" ? C.red : C.inkSoft }}>
-                {estado === "guardando" ? "Guardando…" : estado === "error" ? "No se pudo guardar" : "Guardado ✓"}
+              <span style={{ fontSize: 12, color: estado === "error" ? C.red : C.inkSoft, maxWidth: 460 }} title={errorDetalle ?? undefined}>
+                {estado === "guardando"
+                  ? "Guardando…"
+                  : estado === "error"
+                    ? `No se pudo guardar${errorDetalle ? ` · ${errorDetalle}` : ""}`
+                    : "Guardado ✓"}
               </span>
               <button style={btnGhost} onClick={logout} title={user?.email}>Salir</button>
             </div>
