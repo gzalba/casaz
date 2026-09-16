@@ -1,8 +1,12 @@
 # Portal de compra · Mi casa
 
-App web para gestionar la compra de tu casa: costos de sucesión y escritura (con pagos parciales y dolarización), dinero ahorrado por cuenta, valor a pagar con la deducción del 50% de sucesión, planes de pago y reformas priorizadas.
+App web para gestionar la compra de tu casa: costos de sucesión y escritura (con pagos parciales y dolarización), dinero ahorrado por cuenta, valor a pagar con la deducción de los ítems que marques, planes de pago con entrega en efectivo y cuotas, y un plan de reformas por ambiente y por rubro.
 
-Stack: React + Vite, Firebase Authentication (Google) y Cloud Firestore. Login con Google, un único usuario: cada persona solo ve y edita su propio documento.
+Stack: React + Vite, Firebase Authentication (Google) y Cloud Firestore.
+
+**Acceso: una sola cuenta.** Solo `gzalba@gmail.com` puede entrar. Se controla en dos lados: la app rechaza cualquier otra cuenta de Google al iniciar sesión, y las reglas de Firestore lo vuelven a verificar en el servidor, que es lo que realmente protege los datos. Para cambiar la cuenta hay que tocar `firestore.rules` (y publicarlo) y, opcionalmente, la variable `VITE_EMAIL_AUTORIZADO`.
+
+**Dólar de referencia:** se trae solo de [dolarapi.com](https://dolarapi.com) — blue, oficial, MEP o contado con liqui, a elección — y siempre se puede escribir a mano. Si no hay internet, se sigue usando el último valor guardado.
 
 ---
 
@@ -15,7 +19,9 @@ Stack: React + Vite, Firebase Authentication (Google) y Cloud Firestore. Login c
 
 ## 2. Cargar las reglas de seguridad
 
-En **Firestore Database → Reglas**, pegá el contenido del archivo `firestore.rules` de este proyecto y publicá. Eso garantiza que cada usuario solo pueda tocar su propio documento.
+En **Firestore Database → Reglas**, pegá el contenido del archivo `firestore.rules` de este proyecto y tocá **Publicar**. Eso deja entrar solo a la cuenta autorizada, y solo a su propio documento.
+
+> ⚠️ Cada vez que cambie `firestore.rules` hay que volver a pegarlo y publicarlo a mano: Firebase no lo toma del repositorio.
 
 ## 3. Probarlo local (opcional pero recomendado)
 
@@ -33,6 +39,14 @@ npm run dev
 ```
 
 Abrí la URL que te muestra (normalmente http://localhost:5173), entrá con Google y probá cargar datos.
+
+### Modo demo (sin Firebase ni login)
+
+```bash
+npm run dev:demo      # http://localhost:5180
+```
+
+Sirve para probar la interfaz sin tocar los datos reales: no pide login y todo se guarda solo en ese navegador. Se activa con `VITE_DEMO=1`, que en Vercel nunca está cargada.
 
 ## 4. Subir a Vercel (~5 min)
 
@@ -56,3 +70,6 @@ Listo. Entrás a esa URL desde cualquier dispositivo, iniciás sesión con Googl
 - **Costos**: para un solo usuario, tanto Firebase (plan Spark gratuito) como Vercel (plan Hobby gratuito) alcanzan de sobra. No necesitás cargar tarjeta.
 - **Datos**: todo se guarda en un único documento `usuarios/{tu-uid}` en Firestore. Podés verlo y exportarlo desde la consola de Firebase cuando quieras.
 - **Backups**: si querés, en Firestore podés programar exportaciones, o simplemente copiar el JSON del documento cada tanto.
+- **Deducción**: cada ítem de Sucesión y de Escritura tiene una casilla "entra en la deducción". El valor a pagar de la casa descuenta el 50% (configurable) de la suma de los ítems tildados. Los que no se tildan no descuentan nada.
+- **Planes de pago**: se elige cuánto se entrega en efectivo y en cuántas cuotas se paga el resto; la cuota se muestra en dólares y en pesos al dólar de referencia del momento.
+- **Reformas**: cada una tiene ambiente, rubro, prioridad, cuándo hacerla, estado (idea → presupuestada → en curso → hecha), costo estimado y costo real. La lista se agrupa por cualquiera de esos ejes.
